@@ -1,0 +1,109 @@
+version: '3.8'
+
+# =============================================
+# ML Feature Store Pipeline
+# docker-compose.yml
+# =============================================
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.7.3
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    FEAST_REPO_PATH: /opt/airflow/feature_store/feast_repo
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./feature_engineering:/opt/airflow/feature_engineering
+    - ./feature_store:/opt/airflow/feature_store
+    - ./model:/opt/airflow/model
+    - ./data:/opt/airflow/data
+    - ./logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+
+  # ----- Postgres (Airflow + offline feature store) -----
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  # ----- Redis (Feast online feature store) -----
+  redis:
+    image: redis:7.2
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  # ----- MLflow (experiment tracking) -----
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.8.1
+    container_name: mlflow
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+
+  # ----- Airflow Webserver -----
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      retries: 5
+
+  # ----- Airflow Scheduler -----
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    command: scheduler
+
+  # ----- Airflow Init -----
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow_init
+    command: >
+      bash -c "
+        airflow db init &&
+        airflow users create
+          --username admin
+          --firstname Admin
+          --lastname User
+          --role Admin
+          --email admin@example.com
+          --password admin
+      "
+    restart: "no"
+
+volumes:
+  postgres_data:
+  mlflow_data:
